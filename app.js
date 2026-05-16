@@ -1,5 +1,5 @@
 // ==================== CONFIG ====================
-const BASE_URL = 'https://futballbackend.onrender.com'; // 👈 Set your API base URL here, e.g. 'https://api.futball.app'
+const BASE_URL = 'https://futballbackend-production.up.railway.app'; // 👈 Set your API base URL here, e.g. 'https://api.futball.app'
 
 let config = { baseUrl: BASE_URL, token: '' };
 
