@@ -1,5 +1,6 @@
 // ==================== CONFIG ====================
-const BASE_URL = "https://futballbackend-production-7d3b.up.railway.app";
+const BASE_URL = "https://futballbackend-production-88a0.up.railway.app";
+
 let config = { baseUrl: BASE_URL, token: '' };
 
 // ==================== SIDEBAR ====================
@@ -20,8 +21,6 @@ function logout() {
 }
 
 // ==================== API ====================
-// All responses follow { success, data, message } envelope.
-// We unwrap data automatically; non-2xx throws with backend message.
 async function api(path, method = 'GET', body = null) {
   if (!config.token)
     throw new Error('Not authenticated — please sign in again.');
@@ -40,7 +39,6 @@ async function api(path, method = 'GET', body = null) {
     const msg = json.message || json.error || (json.errors && JSON.stringify(json.errors)) || `HTTP ${res.status}`;
     throw new Error(msg);
   }
-  // Unwrap { data: ... } envelope
   return json.data !== undefined ? json.data : json;
 }
 
@@ -78,6 +76,7 @@ function statusBadge(s) {
   const map = {
     COMPLETED:'badge-green', APPROVED:'badge-green', PROCESSED:'badge-green',
     PAID:'badge-green', COMMISSION_SET:'badge-green', CLOSED:'badge-gray',
+    SETTLED:'badge-green',
     PENDING:'badge-yellow', PENDING_COMMISSION:'badge-yellow', REQUESTED:'badge-yellow',
     FAILED:'badge-red', REJECTED:'badge-red',
     ADMIN:'badge-blue', SUPER_ADMIN:'badge-purple', USER:'badge-gray'
@@ -143,7 +142,8 @@ function navigate(page) {
     dashboard:'Dashboard', admins:'Admin Accounts', users:'All Users',
     transactions:'Platform Transactions', binance:'Crypto Deposits',
     'upgrade-chats':'Admin Upgrade Chats', 'affiliate-withdrawals':'Affiliate Withdrawals',
-    'payout-requests':'Payout Requests', 'audit-log':'Audit Log'
+    'payout-requests':'Payout Requests', 'audit-log':'Audit Log',
+    'withdrawals':'Withdrawal Requests'
   };
   document.getElementById('page-title').textContent = titles[page] || page;
   document.getElementById('alert-container').innerHTML = '';
@@ -155,14 +155,14 @@ function reloadPage() {
     dashboard:renderDashboard, admins:renderAdmins, users:renderUsers,
     transactions:renderTransactions, binance:renderBinance,
     'upgrade-chats':renderUpgradeChats, 'affiliate-withdrawals':renderAffiliateWithdrawals,
-    'payout-requests':renderPayoutRequests, 'audit-log':renderAuditLog
+    'payout-requests':renderPayoutRequests, 'audit-log':renderAuditLog,
+    'withdrawals':renderWithdrawals
   };
   (pages[currentPage] || renderDashboard)();
 }
 
 // ============================================================
-// 1. DASHBOARD — GET /api/super-admin/metrics
-//               GET /api/super-admin/metrics/deposits
+// 1. DASHBOARD
 // ============================================================
 async function renderDashboard() {
   const c = document.getElementById('page-content');
@@ -227,9 +227,7 @@ async function renderDashboard() {
 }
 
 // ============================================================
-// 2. ADMINS — GET  /api/super-admin/admins
-//             GET  /api/super-admin/admins/{id}
-//             POST /api/super-admin/admins
+// 2. ADMINS
 // ============================================================
 async function renderAdmins() {
   const c = document.getElementById('page-content');
@@ -345,8 +343,7 @@ async function createAdmin() {
 }
 
 // ============================================================
-// 3. USERS — GET /api/super-admin/users          (paginated, search, role)
-//            GET /api/super-admin/users/{userId}
+// 3. USERS
 // ============================================================
 let usersPage = 0, usersSearch = '', usersRole = '';
 
@@ -382,8 +379,9 @@ async function renderUsers(page = 0) {
     </div>`;
   try {
     let q = `?page=${usersPage}&size=20`;
-    if (usersSearch) q += `&search=${encodeURIComponent(usersSearch)}`;
-    if (usersRole)   q += `&role=${usersRole}`;
+    if (usersSearch && usersSearch.trim()) q += `&search=${encodeURIComponent(usersSearch.trim())}`;
+    if (usersRole)                         q += `&role=${usersRole}`;
+
     const data = await api(`/api/super-admin/users${q}`);
     const list = data.content || [];
     document.getElementById('users-list').innerHTML = list.length ? `
@@ -436,7 +434,8 @@ async function viewUser(id) {
           ${detailRow('Total Transactions', d.wallet.totalTransactions)}
         </div>` : '<div class="alert alert-info" style="margin-top:12px">ℹ No wallet found for this user.</div>'}
       <div class="modal-footer">
-        <button class="btn-ghost btn-sm" onclick="viewUserTx('${id}')">View Transactions</button>
+        <button class="btn-ghost btn-sm" onclick="viewUserTx('${id}')">Transactions</button>
+        <button class="btn-ghost btn-sm" onclick="viewUserWithdrawals('${id}', '${d.email||''}')">Withdrawals</button>
         <button class="btn-ghost" onclick="closeModal()">Close</button>
       </div>`;
   } catch (e) {
@@ -451,8 +450,66 @@ async function viewUserTx(userId) {
   showAlert('Note: to filter by user, get their Wallet ID from the user detail and paste it in the Wallet ID filter.', 'info', 7000);
 }
 
+// ── View a specific user's withdrawals ───────────────────────────────────────
+// Navigates to the Withdrawals page and loads that user's withdrawal history
+// inline via a dedicated modal so you don't lose your place in the Users list.
+async function viewUserWithdrawals(userId, userEmail) {
+  openModal(`Withdrawals — ${userEmail || userId}`, loading('Fetching withdrawal history…'));
+  try {
+    // Fetch all withdrawals and filter client-side by userId since the
+    // endpoint doesn't support a userId query param directly.
+    let allRows = [], p = 0, total = 1;
+    while (p < total && p < 10) {   // cap at 10 pages (500 rows) to avoid hammering
+      const d = await api(`/api/wallet/withdrawals/admin/all?page=${p}&size=50`);
+      allRows = allRows.concat(d.content || []);
+      total = d.totalPages || 1;
+      p++;
+      // Stop early once we've scrolled past all records for this user
+      if ((d.content || []).length === 0) break;
+    }
+
+    const list = allRows.filter(w =>
+      (w.userId && w.userId === userId) ||
+      (w.user && w.user.id === userId)
+    );
+
+    if (!list.length) {
+      document.getElementById('modal-content').innerHTML = `
+        ${empty('No withdrawal requests found for this user.')}
+        <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`;
+      return;
+    }
+
+    const rows = list.map(w => `<tr>
+      ${labeledTd('Date',    `<span class="mono" style="font-size:12px">${fmtDate(w.createdAt)}</span>`)}
+      ${labeledTd('Amount',  `<strong style="color:var(--red-text)">₵${fmt(w.amount)}</strong>`)}
+      ${labeledTd('Method',  `<span class="badge badge-blue">${w.method||'—'}</span>`)}
+      ${labeledTd('Account', `<span class="mono" style="font-size:11px">${w.accountNumber||'—'}<br>${w.accountName||''}</span>`)}
+      ${labeledTd('Status',  statusBadge(w.status))}
+      ${labeledTd('', `<button class="btn-ghost btn-sm" onclick='viewWithdrawal(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Detail</button>`)}
+    </tr>`).join('');
+
+    document.getElementById('modal-content').innerHTML = `
+      <div class="alert alert-info" style="margin-bottom:14px">
+        ℹ Showing <strong>${list.length}</strong> withdrawal request${list.length!==1?'s':''} for this user.
+      </div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Date</th><th>Amount</th><th>Method</th><th>Account</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <div class="modal-footer">
+        <button class="btn-ghost btn-sm" onclick="navigate('withdrawals')">Open Full Withdrawals Page</button>
+        <button class="btn-ghost" onclick="closeModal()">Close</button>
+      </div>`;
+  } catch (e) {
+    document.getElementById('modal-content').innerHTML = `
+      <div class="alert alert-error">✕ ${e.message}</div>
+      <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`;
+  }
+}
+
 // ============================================================
-// 4. TRANSACTIONS — GET /api/super-admin/transactions
+// 4. TRANSACTIONS
 // ============================================================
 let txPage = 0, txKind = '', txStatus = '', txFrom = '', txTo = '', txWalletId = '';
 const TX_KINDS = ['DEPOSIT','WITHDRAW','WITHDRAW_HOLD','WITHDRAW_RELEASE','BET_STAKE','BET_WIN',
@@ -1165,7 +1222,267 @@ async function renderAuditLog(page=0) {
 }
 
 // ============================================================
-// INIT — read token from localStorage, redirect to auth if missing
+// 10. WITHDRAWAL REQUESTS
+// ============================================================
+let wdPage=0, wdStatus='';
+
+async function renderWithdrawals(page=0) {
+  wdPage = page;
+  const c = document.getElementById('page-content');
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <h2>Withdrawal Requests</h2>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn-ghost btn-sm" onclick="exportWithdrawalsCSV()">⬇ Export CSV</button>
+          <button class="btn-ghost btn-sm" onclick="renderWithdrawals(${wdPage})">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="alert alert-info" style="margin-bottom:16px">
+          ℹ <strong>Flow:</strong>
+          User submits → wallet debited immediately →
+          <span class="badge badge-yellow">PENDING</span> →
+          Approve →
+          <span class="badge badge-green">APPROVED</span> →
+          Settle (payment sent) →
+          <span class="badge badge-green">SETTLED</span>.
+          Rejecting or marking failed at any stage <strong>re-credits</strong> the user's wallet.
+        </div>
+        <div class="form-row" style="margin-bottom:16px">
+          <div class="form-group">
+            <label>Status</label>
+            <select onchange="wdStatus=this.value;renderWithdrawals(0)">
+              <option value=""         ${wdStatus===''?'selected':''}>All statuses</option>
+              <option value="PENDING"  ${wdStatus==='PENDING'?'selected':''}>PENDING</option>
+              <option value="APPROVED" ${wdStatus==='APPROVED'?'selected':''}>APPROVED</option>
+              <option value="SETTLED"  ${wdStatus==='SETTLED'?'selected':''}>SETTLED</option>
+              <option value="REJECTED" ${wdStatus==='REJECTED'?'selected':''}>REJECTED</option>
+              <option value="FAILED"   ${wdStatus==='FAILED'?'selected':''}>FAILED</option>
+            </select>
+          </div>
+          <button class="btn-ghost" style="align-self:flex-end" onclick="wdStatus='';renderWithdrawals(0)">Clear</button>
+        </div>
+        <div id="wd-list">${loading()}</div>
+      </div>
+    </div>`;
+
+  try {
+    let q = `?page=${wdPage}&size=20`;
+    if (wdStatus) q += `&status=${wdStatus}`;
+    const data = await api(`/api/wallet/withdrawals/admin/all${q}`);
+    const list = data.content || [];
+
+    document.getElementById('wd-list').innerHTML = list.length ? `
+      <div class="tbl-wrap"><table>
+        <thead><tr>
+          <th>Date</th><th>User</th><th>Amount</th><th>Method</th>
+          <th>Account</th><th>Status</th><th>Actions</th>
+        </tr></thead>
+        <tbody>${list.map(w => `<tr>
+          ${labeledTd('Date',    `<span class="mono">${fmtDate(w.createdAt)}</span>`)}
+          ${labeledTd('User',    w.user ? `<span style="font-size:12px">${(w.user.firstName||'')+' '+(w.user.lastName||'')}<br><span class="mono" style="color:var(--text-dim)">${w.user.email||''}</span></span>` : `<span class="mono">${truncate(w.userId,16)}</span>`)}
+          ${labeledTd('Amount',  `<strong style="color:var(--red-text)">₵${fmt(w.amount)}</strong>`)}
+          ${labeledTd('Method',  `<span class="badge badge-blue">${w.method||'—'}</span>${w.network ? `<span class="badge badge-gray" style="margin-left:4px">${w.network}</span>` : ''}`)}
+          ${labeledTd('Account', `<span class="mono" style="font-size:12px">${w.accountNumber||'—'}<br>${w.accountName||''}</span>`)}
+          ${labeledTd('Status',  statusBadge(w.status))}
+          ${labeledTd('Actions', `<div class="btn-row">
+            <button class="btn-ghost btn-sm" onclick='viewWithdrawal(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Detail</button>
+            ${w.status==='PENDING' ? `
+              <button class="btn-success btn-sm" onclick="approveWithdrawal('${w.id}')">Approve</button>
+              <button class="btn-danger btn-sm"  onclick="openRejectWithdrawal('${w.id}')">Reject</button>` : ''}
+            ${w.status==='APPROVED' ? `
+              <button class="btn-primary btn-sm" onclick="openSettleWithdrawal('${w.id}',${w.amount})">Settle</button>
+              <button class="btn-danger btn-sm"  onclick="openFailWithdrawal('${w.id}')">Mark Failed</button>` : ''}
+          </div>`)}
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
+        <span class="pager-info">${data.totalElements.toLocaleString()} total withdrawal requests</span>
+        ${paginator(wdPage, data.totalPages, 'renderWithdrawals')}
+      </div>` : empty('No withdrawal requests found.');
+  } catch (e) {
+    document.getElementById('wd-list').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+  }
+}
+
+function viewWithdrawal(w) {
+  const user = w.user || {};
+  openModal('Withdrawal Request Detail', `
+    <div class="section-title">Request</div>
+    <div class="detail-grid">
+      ${detailRow('ID',              `<span class="mono">${w.id}</span>`)}
+      ${detailRow('Status',          statusBadge(w.status))}
+      ${detailRow('Amount',          `<strong>₵${fmt(w.amount)}</strong>`)}
+      ${detailRow('Currency',        w.currency||'GHS')}
+      ${detailRow('Method',          w.method||'—')}
+      ${detailRow('Network',         w.network||'—')}
+      ${detailRow('Account Number',  w.accountNumber||'—')}
+      ${detailRow('Account Name',    w.accountName||'—')}
+      ${detailRow('Submitted',       fmtDate(w.createdAt))}
+      ${detailRow('Reviewed At',     fmtDate(w.reviewedAt))}
+      ${detailRow('Settled At',      fmtDate(w.settledAt))}
+      ${detailRow('Admin Note',      w.adminNote||'—')}
+      ${detailRow('Super Admin Note',w.superAdminNote||'—')}
+    </div>
+    ${w.user ? `
+      <div class="section-title">User</div>
+      <div class="detail-grid">
+        ${detailRow('Name',  `${user.firstName||''} ${user.lastName||''}`.trim())}
+        ${detailRow('Email', user.email||'—')}
+        ${detailRow('ID',    `<span class="mono">${user.id||w.userId}</span>`)}
+      </div>` : ''}
+    <div class="modal-footer">
+      ${w.status==='PENDING' ? `
+        <button class="btn-success" onclick="closeModal();approveWithdrawal('${w.id}')">Approve</button>
+        <button class="btn-danger"  onclick="closeModal();openRejectWithdrawal('${w.id}')">Reject</button>` : ''}
+      ${w.status==='APPROVED' ? `
+        <button class="btn-primary" onclick="closeModal();openSettleWithdrawal('${w.id}',${w.amount})">Settle</button>
+        <button class="btn-danger"  onclick="closeModal();openFailWithdrawal('${w.id}')">Mark Failed</button>` : ''}
+      <button class="btn-ghost" onclick="closeModal()">Close</button>
+    </div>`);
+}
+
+async function approveWithdrawal(id) {
+  if (!confirm('Approve this withdrawal request?\n\nThe wallet has already been debited — this just moves it to APPROVED for settlement.')) return;
+  try {
+    await api(`/api/wallet/withdrawals/admin/${id}/approve`, 'POST', { note: '' });
+    showAlert('Withdrawal approved. Now use Settle once payment is sent.', 'success', 6000);
+    renderWithdrawals(wdPage);
+  } catch (e) { showAlert('Error: '+e.message, 'error'); }
+}
+
+function openRejectWithdrawal(id) {
+  openModal('Reject Withdrawal', `
+    <div class="alert alert-warning">⚠ Rejecting will <strong>re-credit</strong> the full amount back to the user's wallet.</div>
+    <div class="form-group" style="margin-bottom:12px;margin-top:12px">
+      <label>Rejection Note * (visible to admin)</label>
+      <textarea id="wd-rej-note" placeholder="Unable to verify account details…"></textarea>
+    </div>
+    <div id="wd-rej-msg"></div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn-danger" id="wd-rej-btn" onclick="rejectWithdrawal('${id}')">✕ Reject & Re-credit Wallet</button>
+    </div>`);
+}
+
+async function rejectWithdrawal(id) {
+  const note = document.getElementById('wd-rej-note').value.trim();
+  if (!note) {
+    document.getElementById('wd-rej-msg').innerHTML = '<div class="alert alert-error">✕ Rejection note is required.</div>';
+    return;
+  }
+  const btn = document.getElementById('wd-rej-btn');
+  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Rejecting…';
+  try {
+    await api(`/api/wallet/withdrawals/admin/${id}/reject`, 'POST', { note });
+    closeModal();
+    showAlert('Withdrawal rejected. User wallet has been re-credited.', 'success');
+    renderWithdrawals(wdPage);
+  } catch (e) {
+    document.getElementById('wd-rej-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    btn.disabled=false; btn.innerHTML='✕ Reject & Re-credit Wallet';
+  }
+}
+
+function openSettleWithdrawal(id, amount) {
+  openModal('Settle Withdrawal', `
+    <div class="alert alert-info">ℹ Settling confirms you have <strong>physically sent ₵${fmt(amount)}</strong> to the user. The WITHDRAW_HOLD transaction will be converted to WITHDRAW.</div>
+    <div class="form-group" style="margin-bottom:12px;margin-top:12px">
+      <label>Super Admin Note (optional)</label>
+      <textarea id="wd-settle-note" placeholder="Sent via MTN Mobile Money. Ref: XXXXXXXX"></textarea>
+    </div>
+    <div id="wd-settle-msg"></div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn-success" id="wd-settle-btn" onclick="settleWithdrawal('${id}')">✓ Confirm Settlement</button>
+    </div>`);
+}
+
+async function settleWithdrawal(id) {
+  const note = document.getElementById('wd-settle-note').value.trim();
+  const btn = document.getElementById('wd-settle-btn');
+  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Settling…';
+  try {
+    await api(`/api/wallet/withdrawals/super-admin/${id}/settle`, 'POST', { note });
+    closeModal();
+    showAlert('Withdrawal settled successfully! Payment confirmed.', 'success');
+    renderWithdrawals(wdPage);
+  } catch (e) {
+    document.getElementById('wd-settle-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    btn.disabled=false; btn.innerHTML='✓ Confirm Settlement';
+  }
+}
+
+function openFailWithdrawal(id) {
+  openModal('Mark Withdrawal Failed', `
+    <div class="alert alert-warning">⚠ Marking as failed will <strong>re-credit</strong> the full amount back to the user's wallet.</div>
+    <div class="form-group" style="margin-bottom:12px;margin-top:12px">
+      <label>Failure Reason * (visible to super admin log)</label>
+      <textarea id="wd-fail-note" placeholder="Mobile Money transaction declined by provider…"></textarea>
+    </div>
+    <div id="wd-fail-msg"></div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn-danger" id="wd-fail-btn" onclick="failWithdrawal('${id}')">Mark as Failed & Re-credit</button>
+    </div>`);
+}
+
+async function failWithdrawal(id) {
+  const note = document.getElementById('wd-fail-note').value.trim();
+  if (!note) {
+    document.getElementById('wd-fail-msg').innerHTML = '<div class="alert alert-error">✕ Failure reason is required.</div>';
+    return;
+  }
+  const btn = document.getElementById('wd-fail-btn');
+  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Processing…';
+  try {
+    await api(`/api/wallet/withdrawals/super-admin/${id}/mark-failed`, 'POST', { note });
+    closeModal();
+    showAlert('Withdrawal marked as failed. User wallet has been re-credited.', 'success');
+    renderWithdrawals(wdPage);
+  } catch (e) {
+    document.getElementById('wd-fail-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    btn.disabled=false; btn.innerHTML='Mark as Failed & Re-credit';
+  }
+}
+
+async function exportWithdrawalsCSV() {
+  const btn = document.querySelector('[onclick="exportWithdrawalsCSV()"]');
+  if (btn) { btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Exporting…'; }
+  try {
+    let rows=[], p=0, total=1;
+    while (p < total) {
+      let q = `?page=${p}&size=100`;
+      if (wdStatus) q+=`&status=${wdStatus}`;
+      const d = await api(`/api/wallet/withdrawals/admin/all${q}`);
+      rows = rows.concat(d.content||[]);
+      total = d.totalPages||1;
+      p++;
+    }
+    if (!rows.length) { showAlert('No data to export.','error'); return; }
+    const headers=['ID','User Email','User ID','Amount (GHS)','Currency','Method','Network',
+      'Account Number','Account Name','Status','Admin Note','Super Admin Note',
+      'Reviewed At','Settled At','Created At'];
+    exportCSV(`withdrawals-${new Date().toISOString().slice(0,10)}.csv`, headers,
+      rows.map(w=>[
+        w.id,
+        w.user?.email??'',
+        w.user?.id??w.userId??'',
+        w.amount, w.currency||'GHS',
+        w.method||'', w.network||'',
+        w.accountNumber||'', w.accountName||'',
+        w.status,
+        w.adminNote||'', w.superAdminNote||'',
+        w.reviewedAt??'', w.settledAt??'', w.createdAt
+      ]));
+    showAlert(`Exported ${rows.length} withdrawal rows!`, 'success');
+  } catch(e) { showAlert('Export failed: '+e.message,'error'); }
+  finally { if (btn) { btn.disabled=false; btn.innerHTML='⬇ Export CSV'; } }
+}
+
+// ============================================================
+// INIT
 // ============================================================
 window.onload = () => {
   const token = localStorage.getItem('fb_token');
